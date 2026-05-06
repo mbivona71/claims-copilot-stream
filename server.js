@@ -87,6 +87,7 @@ wss.on('connection', (twilioWs) => {
   let sessionId = null;
   let dgLive = null;
   let dgConnected = false;
+  let audioBuffer = [];
 
   // Open Deepgram live transcription session
   function connectDeepgram() {
@@ -104,6 +105,14 @@ wss.on('connection', (twilioWs) => {
     live.on('open', () => {
       dgConnected = true;
       console.log('[Deepgram] Connected');
+      // Flush any buffered audio
+      if (audioBuffer.length > 0) {
+        console.log(`[Deepgram] Flushing ${audioBuffer.length} buffered audio chunks`);
+        for (const chunk of audioBuffer) {
+          try { live.send(chunk); } catch (_) {}
+        }
+        audioBuffer = [];
+      }
     });
 
     live.on('transcript', async (data) => {
@@ -185,13 +194,16 @@ wss.on('connection', (twilioWs) => {
         const payload = msg.media?.payload;
         if (!payload) break;
 
+        const audioBytes = Buffer.from(payload, 'base64');
         if (dgConnected && dgLive) {
           try {
-            const audioBytes = Buffer.from(payload, 'base64');
             dgLive.send(audioBytes);
           } catch (_) {
             console.error('[Twilio] Error forwarding audio');
           }
+        } else {
+          // Buffer audio until Deepgram is ready
+          audioBuffer.push(audioBytes);
         }
         break;
       }
