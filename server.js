@@ -1,12 +1,12 @@
 /* eslint-disable no-undef */
 /**
- * Twilio Media Streams → Deepgram → Base44
+ * Twilio Media Streams → Deepgram → Base44 (via ingestTranscript function)
  * Deploy on Render as a Web Service (Node.js)
  *
  * Required environment variables:
  *   DEEPGRAM_API_KEY   - from console.deepgram.com
- *   BASE44_APP_ID      - from your Base44 app settings
- *   BASE44_API_KEY     - a Base44 service API key
+ *   BASE44_INGEST_URL  - URL of the Base44 ingestTranscript backend function
+ *   INGEST_SECRET      - shared secret to authenticate calls to Base44
  *   PORT               - set automatically by Render
  */
 
@@ -19,13 +19,12 @@ const app = express();
 const server = http.createServer(app);
 
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
-const BASE44_APP_ID = process.env.BASE44_APP_ID;
-const BASE44_API_KEY = process.env.BASE44_API_KEY;
+const BASE44_INGEST_URL = process.env.BASE44_INGEST_URL;
+const INGEST_SECRET = process.env.INGEST_SECRET;
 const PORT = process.env.PORT || 3000;
 
 if (!DEEPGRAM_API_KEY) throw new Error('Missing DEEPGRAM_API_KEY');
-if (!BASE44_APP_ID) throw new Error('Missing BASE44_APP_ID');
-if (!BASE44_API_KEY) throw new Error('Missing BASE44_API_KEY');
+if (!BASE44_INGEST_URL) throw new Error('Missing BASE44_INGEST_URL');
 
 const deepgramClient = createClient(DEEPGRAM_API_KEY);
 
@@ -34,44 +33,31 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'twilio-deepgram-bridge' });
 });
 
-// ── Base44 helper ──────────────────────────────────────────────────────────────
-const BASE44_BASE = `https://api.base44.app/api/apps/${BASE44_APP_ID}/entities`;
-
-async function base44Request(method, path, body) {
-  const res = await fetch(`${BASE44_BASE}${path}`, {
-    method,
+// ── Base44 ingest helper ───────────────────────────────────────────────────────
+async function ingest(action, data) {
+  const res = await fetch(BASE44_INGEST_URL, {
+    method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'api-key': BASE44_API_KEY,
+      ...(INGEST_SECRET ? { 'x-ingest-secret': INGEST_SECRET } : {}),
     },
-    body: body ? JSON.stringify(body) : undefined,
+    body: JSON.stringify({ action, data }),
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Base44 ${method} ${path} → ${res.status}: ${text}`);
+    throw new Error(`ingest(${action}) → ${res.status}: ${text}`);
   }
   return res.json();
 }
 
 async function findOrCreateCallSession(callSid, from, to) {
-  const existing = await base44Request('GET', `/CallSession?call_sid=${encodeURIComponent(callSid)}&_limit=1`);
-  if (existing && existing.length > 0) {
-    console.log(`[Base44] Found existing CallSession: ${existing[0].id}`);
-    return existing[0].id;
-  }
-  const session = await base44Request('POST', '/CallSession', {
-    call_sid: callSid,
-    from_number: from || '',
-    to_number: to || '',
-    status: 'active',
-    started_at: new Date().toISOString(),
-  });
-  console.log(`[Base44] Created CallSession: ${session.id}`);
-  return session.id;
+  const result = await ingest('createSession', { call_sid: callSid, from_number: from, to_number: to });
+  console.log(`[Base44] CallSession id: ${result.id}`);
+  return result.id;
 }
 
 async function saveTranscriptChunk({ sessionId, callSid, text, isFinal, confidence, speaker, timestampMs }) {
-  await base44Request('POST', '/TranscriptChunk', {
+  await ingest('saveChunk', {
     call_session_id: sessionId,
     call_sid: callSid,
     text,
@@ -84,10 +70,7 @@ async function saveTranscriptChunk({ sessionId, callSid, text, isFinal, confiden
 }
 
 async function markSessionCompleted(sessionId) {
-  await base44Request('PUT', `/CallSession/${sessionId}`, {
-    status: 'completed',
-    ended_at: new Date().toISOString(),
-  });
+  await ingest('completeSession', { call_session_id: sessionId });
   console.log(`[Base44] Marked CallSession ${sessionId} completed`);
 }
 
@@ -105,6 +88,7 @@ wss.on('connection', (twilioWs) => {
   let dgLive = null;
   let dgConnected = false;
 
+  // Open Deepgram live transcription session
   function connectDeepgram() {
     const live = deepgramClient.listen.live({
       encoding: 'mulaw',
@@ -168,6 +152,7 @@ wss.on('connection', (twilioWs) => {
 
   dgLive = connectDeepgram();
 
+  // Handle messages from Twilio
   twilioWs.on('message', async (raw) => {
     let msg;
     try {
