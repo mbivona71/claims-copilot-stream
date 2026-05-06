@@ -93,7 +93,7 @@ wss.on('connection', (twilioWs) => {
   function connectDeepgram() {
     let audioChunksSent = 0;
 
-    console.log('[Deepgram] Initializing live transcription...');
+    console.log('[Deepgram] Initializing live transcription (SDK 3.3.0)...');
     const live = deepgramClient.listen.live({
       encoding: 'mulaw',
       sample_rate: 8000,
@@ -110,7 +110,7 @@ wss.on('connection', (twilioWs) => {
 
     live.on('open', () => {
       dgConnected = true;
-      console.log('[Deepgram] Connected and ready to receive audio');
+      console.log('[Deepgram] ✓ Connected and ready to receive audio');
       // Flush any buffered audio
       if (audioBuffer.length > 0) {
         console.log(`[Deepgram] Flushing ${audioBuffer.length} buffered audio chunks`);
@@ -129,11 +129,23 @@ wss.on('connection', (twilioWs) => {
       }
     });
 
-    // Transcript event (try both naming conventions for SDK compatibility)
-    const handleTranscript = async (data) => {
-      console.log('[Deepgram] ✓ TRANSCRIPT event received (raw):', JSON.stringify(data, null, 2));
+    // Handle transcript results (SDK 3.3.0 uses "Results" event name)
+    const handleResults = async (data) => {
+      console.log('[Deepgram] 📨 EVENT: Results (raw payload):', JSON.stringify(data, null, 2));
 
-      const alt = data?.channel?.alternatives?.[0];
+      const results = data?.results;
+      if (!results || results.length === 0) {
+        console.log('[Deepgram] No results in payload, skipping');
+        return;
+      }
+
+      const channel = results[0]?.channel;
+      if (!channel || !channel.alternatives || channel.alternatives.length === 0) {
+        console.log('[Deepgram] No channel alternatives, skipping');
+        return;
+      }
+
+      const alt = channel.alternatives[0];
       const transcript = alt?.transcript || '';
 
       if (!transcript.trim()) {
@@ -143,10 +155,10 @@ wss.on('connection', (twilioWs) => {
 
       const isFinal = data.is_final === true;
       const confidence = alt.confidence ?? null;
-      const speaker = data?.channel?.alternatives?.[0]?.words?.[0]?.speaker;
+      const speaker = alt?.words?.[0]?.speaker;
       const speakerLabel = speaker !== undefined ? `Speaker ${speaker}` : 'Unknown Speaker';
 
-      console.log(`[Deepgram] Transcript (final=${isFinal}, confidence=${confidence}, speaker=${speakerLabel}): "${transcript}"`);
+      console.log(`[Deepgram] ✓ Transcript (final=${isFinal}, confidence=${confidence}, speaker=${speakerLabel}): "${transcript}"`);
 
       if (!sessionId) {
         console.log('[Deepgram] ⚠ No sessionId yet, cannot save');
@@ -168,47 +180,47 @@ wss.on('connection', (twilioWs) => {
       }
     };
 
-    // Register transcript listener (support both naming styles)
-    live.on('transcript', handleTranscript);
-    live.on('Transcript', handleTranscript);
+    // Register all possible transcript event listeners (SDK 3.3.0 compatibility)
+    live.on('Results', handleResults);
+    live.on('results', handleResults);
+    live.on('transcript', handleResults);
+    live.on('Transcript', handleResults);
 
     // Speech started event
     const handleSpeechStarted = () => {
-      console.log('[Deepgram] 🎤 Speech started');
+      console.log('[Deepgram] 🎤 EVENT: SpeechStarted');
     };
     live.on('speech_started', handleSpeechStarted);
     live.on('SpeechStarted', handleSpeechStarted);
 
     // Utterance end event
     const handleUtteranceEnd = (data) => {
-      console.log('[Deepgram] 📝 Utterance end:', JSON.stringify(data, null, 2));
+      console.log('[Deepgram] 📝 EVENT: UtteranceEnd (raw):', JSON.stringify(data, null, 2));
     };
     live.on('utterance_end', handleUtteranceEnd);
     live.on('UtteranceEnd', handleUtteranceEnd);
 
     // Metadata event
     const handleMetadata = (data) => {
-      console.log('[Deepgram] 📊 METADATA:', JSON.stringify(data, null, 2));
+      console.log('[Deepgram] 📊 EVENT: Metadata (raw):', JSON.stringify(data, null, 2));
     };
     live.on('metadata', handleMetadata);
     live.on('Metadata', handleMetadata);
 
     // Error event
     const handleError = (err) => {
-      console.error('[Deepgram] ✗ ERROR:', err.message || JSON.stringify(err));
+      console.error('[Deepgram] ✗ EVENT: Error -', err.message || JSON.stringify(err));
     };
     live.on('error', handleError);
     live.on('Error', handleError);
 
     // Close event
-    live.on('close', () => {
+    const handleClose = () => {
       dgConnected = false;
-      console.log(`[Deepgram] ✗ Disconnected (sent ${audioChunksSent} total chunks)`);
-    });
-    live.on('Close', () => {
-      dgConnected = false;
-      console.log(`[Deepgram] ✗ Disconnected (Close event, sent ${audioChunksSent} chunks)`);
-    });
+      console.log(`[Deepgram] ✗ EVENT: Close (sent ${audioChunksSent} total chunks)`);
+    };
+    live.on('close', handleClose);
+    live.on('Close', handleClose);
 
     return live;
   }
