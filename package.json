@@ -1,0 +1,17 @@
+{
+  "name": "twilio-deepgram-bridge",
+  "version": "1.0.0",
+  "description": "WebSocket bridge: Twilio Media Streams → Deepgram → Base44",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@deepgram/sdk": "^3.3.0",
+    "ws": "^8.17.0",
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
