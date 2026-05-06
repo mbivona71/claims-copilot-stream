@@ -133,29 +133,18 @@ wss.on('connection', (twilioWs) => {
     const handleResults = async (data) => {
       console.log('[Deepgram] 📨 EVENT: Results (raw payload):', JSON.stringify(data, null, 2));
 
-      const results = data?.results;
-      if (!results || results.length === 0) {
-        console.log('[Deepgram] No results in payload, skipping');
-        return;
-      }
-
-      const channel = results[0]?.channel;
-      if (!channel || !channel.alternatives || channel.alternatives.length === 0) {
-        console.log('[Deepgram] No channel alternatives, skipping');
-        return;
-      }
-
-      const alt = channel.alternatives[0];
-      const transcript = alt?.transcript || '';
+      const transcript = data?.channel?.alternatives?.[0]?.transcript || '';
+      const confidence = data?.channel?.alternatives?.[0]?.confidence || 0;
 
       if (!transcript.trim()) {
         console.log('[Deepgram] Empty transcript, skipping save');
         return;
       }
 
+      console.log('[Deepgram] Transcript:', transcript);
+
       const isFinal = data.is_final === true;
-      const confidence = alt.confidence ?? null;
-      const speaker = alt?.words?.[0]?.speaker;
+      const speaker = data?.channel?.alternatives?.[0]?.words?.[0]?.speaker;
       const speakerLabel = speaker !== undefined ? `Speaker ${speaker}` : 'Unknown Speaker';
 
       console.log(`[Deepgram] ✓ Transcript (final=${isFinal}, confidence=${confidence}, speaker=${speakerLabel}): "${transcript}"`);
@@ -263,6 +252,15 @@ wss.on('connection', (twilioWs) => {
       }
 
       case 'media': {
+        const track = msg.media?.track;
+        console.log('TRACK:', track);
+        
+        // Only forward inbound track (mono mulaw) to Deepgram
+        if (track !== 'inbound') {
+          console.log(`[Twilio] Skipping non-inbound track: ${track}`);
+          break;
+        }
+
         mediaChunksReceived++;
         const payload = msg.media?.payload;
         if (!payload) {
