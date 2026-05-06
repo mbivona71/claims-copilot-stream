@@ -91,6 +91,9 @@ wss.on('connection', (twilioWs) => {
 
   // Open Deepgram live transcription session
   function connectDeepgram() {
+    let audioChunksSent = 0;
+
+    console.log('[Deepgram] Initializing live transcription...');
     const live = deepgramClient.listen.live({
       encoding: 'mulaw',
       sample_rate: 8000,
@@ -100,35 +103,53 @@ wss.on('connection', (twilioWs) => {
       punctuate: true,
       interim_results: true,
       diarize: true,
+      smart_format: true,
+      endpointing: 300,
+      vad_events: true,
     });
 
     live.on('open', () => {
       dgConnected = true;
-      console.log('[Deepgram] Connected');
+      console.log('[Deepgram] Connected and ready to receive audio');
       // Flush any buffered audio
       if (audioBuffer.length > 0) {
         console.log(`[Deepgram] Flushing ${audioBuffer.length} buffered audio chunks`);
         for (const chunk of audioBuffer) {
-          try { live.send(chunk); } catch (_) {}
+          try {
+            live.send(chunk);
+            audioChunksSent++;
+            if (audioChunksSent % 50 === 0) {
+              console.log(`[Deepgram] Sent ${audioChunksSent} chunks to Deepgram`);
+            }
+          } catch (e) {
+            console.error('[Deepgram] Error flushing buffer:', e.message);
+          }
         }
         audioBuffer = [];
       }
     });
 
-    live.on('transcript', async (data) => {
+    // Transcript event (try both naming conventions for SDK compatibility)
+    const handleTranscript = async (data) => {
+      console.log('[Deepgram] ✓ TRANSCRIPT event received (raw):', JSON.stringify(data, null, 2));
+
       const alt = data?.channel?.alternatives?.[0];
-      const transcript = alt?.transcript;
-      if (!transcript || transcript.trim() === '') return;
+      const transcript = alt?.transcript || '';
+
+      if (!transcript.trim()) {
+        console.log('[Deepgram] Empty transcript, skipping save');
+        return;
+      }
 
       const isFinal = data.is_final === true;
       const confidence = alt.confidence ?? null;
       const speaker = data?.channel?.alternatives?.[0]?.words?.[0]?.speaker;
-      const speakerLabel = speaker !== undefined ? `Speaker ${speaker}` : '';
+      const speakerLabel = speaker !== undefined ? `Speaker ${speaker}` : 'Unknown Speaker';
 
-      console.log(`[Deepgram] Transcript (final=${isFinal}): "${transcript}"`);
+      console.log(`[Deepgram] Transcript (final=${isFinal}, confidence=${confidence}, speaker=${speakerLabel}): "${transcript}"`);
 
       if (!sessionId) {
-        console.log('[Deepgram] No sessionId yet, skipping save');
+        console.log('[Deepgram] ⚠ No sessionId yet, cannot save');
         return;
       }
 
@@ -143,17 +164,50 @@ wss.on('connection', (twilioWs) => {
           timestampMs: Date.now(),
         });
       } catch (err) {
-        console.error('[Base44] Error saving chunk:', err.message);
+        console.error('[Base44] ✗ Error saving chunk:', err.message);
       }
-    });
+    };
 
-    live.on('error', (err) => {
-      console.error('[Deepgram] Error:', err.message || err);
-    });
+    // Register transcript listener (support both naming styles)
+    live.on('transcript', handleTranscript);
+    live.on('Transcript', handleTranscript);
 
+    // Speech started event
+    const handleSpeechStarted = () => {
+      console.log('[Deepgram] 🎤 Speech started');
+    };
+    live.on('speech_started', handleSpeechStarted);
+    live.on('SpeechStarted', handleSpeechStarted);
+
+    // Utterance end event
+    const handleUtteranceEnd = (data) => {
+      console.log('[Deepgram] 📝 Utterance end:', JSON.stringify(data, null, 2));
+    };
+    live.on('utterance_end', handleUtteranceEnd);
+    live.on('UtteranceEnd', handleUtteranceEnd);
+
+    // Metadata event
+    const handleMetadata = (data) => {
+      console.log('[Deepgram] 📊 METADATA:', JSON.stringify(data, null, 2));
+    };
+    live.on('metadata', handleMetadata);
+    live.on('Metadata', handleMetadata);
+
+    // Error event
+    const handleError = (err) => {
+      console.error('[Deepgram] ✗ ERROR:', err.message || JSON.stringify(err));
+    };
+    live.on('error', handleError);
+    live.on('Error', handleError);
+
+    // Close event
     live.on('close', () => {
       dgConnected = false;
-      console.log('[Deepgram] Disconnected');
+      console.log(`[Deepgram] ✗ Disconnected (sent ${audioChunksSent} total chunks)`);
+    });
+    live.on('Close', () => {
+      dgConnected = false;
+      console.log(`[Deepgram] ✗ Disconnected (Close event, sent ${audioChunksSent} chunks)`);
     });
 
     return live;
@@ -162,6 +216,9 @@ wss.on('connection', (twilioWs) => {
   dgLive = connectDeepgram();
 
   // Handle messages from Twilio
+  let mediaChunksReceived = 0;
+  let audioChunksSentThisSession = 0;
+
   twilioWs.on('message', async (raw) => {
     let msg;
     try {
@@ -173,6 +230,8 @@ wss.on('connection', (twilioWs) => {
     switch (msg.event) {
       case 'connected':
         console.log('[Twilio] Event: connected');
+        mediaChunksReceived = 0;
+        audioChunksSentThisSession = 0;
         break;
 
       case 'start': {
@@ -180,46 +239,68 @@ wss.on('connection', (twilioWs) => {
         streamSid = msg.start?.streamSid || null;
         from = msg.start?.customParameters?.from || '';
         to = msg.start?.customParameters?.to || '';
-        console.log(`[Twilio] Event: start | callSid=${callSid} streamSid=${streamSid}`);
+        console.log(`[Twilio] Event: start | callSid=${callSid} streamSid=${streamSid} from=${from} to=${to}`);
 
         try {
           sessionId = await findOrCreateCallSession(callSid, from, to);
+          console.log(`[Twilio] ✓ Created Base44 CallSession: ${sessionId}`);
         } catch (err) {
-          console.error('[Base44] Error creating session:', err.message);
+          console.error('[Base44] ✗ Error creating session:', err.message);
         }
         break;
       }
 
       case 'media': {
+        mediaChunksReceived++;
         const payload = msg.media?.payload;
-        if (!payload) break;
+        if (!payload) {
+          console.warn('[Twilio] Media event missing payload');
+          break;
+        }
+
+        if (mediaChunksReceived % 50 === 0) {
+          console.log(`[Twilio] ✓ Received ${mediaChunksReceived} media chunks (payload len: ${payload.length}, dgConnected: ${dgConnected})`);
+        }
 
         const audioBytes = Buffer.from(payload, 'base64');
         if (dgConnected && dgLive) {
           try {
             dgLive.send(audioBytes);
-          } catch (_) {
-            console.error('[Twilio] Error forwarding audio');
+            audioChunksSentThisSession++;
+            if (audioChunksSentThisSession % 50 === 0) {
+              console.log(`[Twilio→Deepgram] ✓ Sent ${audioChunksSentThisSession} audio chunks to Deepgram (${audioBytes.length} bytes each)`);
+            }
+          } catch (e) {
+            console.error('[Twilio→Deepgram] ✗ Error forwarding audio:', e.message);
           }
         } else {
           // Buffer audio until Deepgram is ready
           audioBuffer.push(audioBytes);
+          if (audioBuffer.length % 20 === 0) {
+            console.log(`[Twilio] ⏳ Buffering (${audioBuffer.length} chunks) - Deepgram connected: ${dgConnected}`);
+          }
         }
         break;
       }
 
       case 'stop':
-        console.log('[Twilio] Event: stop');
+        console.log(`[Twilio] Event: stop (received ${mediaChunksReceived} total media chunks, sent ${audioChunksSentThisSession} to Deepgram)`);
 
         if (dgLive) {
-          try { dgLive.finish(); } catch (_) {}
+          try {
+            console.log('[Deepgram] Finishing stream...');
+            dgLive.finish();
+          } catch (e) {
+            console.error('[Deepgram] Error finishing stream:', e.message);
+          }
         }
 
         if (sessionId) {
           try {
             await markSessionCompleted(sessionId);
+            console.log(`[Base44] ✓ Marked CallSession ${sessionId} as completed`);
           } catch (err) {
-            console.error('[Base44] Error completing session:', err.message);
+            console.error('[Base44] ✗ Error completing session:', err.message);
           }
         }
         break;
